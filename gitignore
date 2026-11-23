@@ -1,0 +1,7 @@
+# build outputs
+switch
+host
+swctl
+switch_tsan
+*.o
+*.log
