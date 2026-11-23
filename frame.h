@@ -8,7 +8,8 @@
 #define HDR_LEN 17
 #define MAX_PAYLOAD 1500
 
-struct frame {
+struct frame 
+{
     uint16_t length;
     uint8_t src[MAC_LEN];
     uint8_t dst[MAC_LEN];
