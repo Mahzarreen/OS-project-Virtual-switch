@@ -1,7 +1,6 @@
 /* host.c - test host: sends frames typed on stdin and prints every frame it receives */
 #define _GNU_SOURCE
 #include "frame.h"
-
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -11,7 +10,6 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
-
 static int sock;
 static uint8_t my_mac[MAC_LEN];
 static uint16_t my_vlan = 1;
@@ -48,7 +46,6 @@ static void *receiver(void *arg)
     }
     return NULL;
 }
-
 static void set_frozen(int value)
 {
     pthread_mutex_lock(&freeze_lock);
@@ -57,7 +54,6 @@ static void set_frozen(int value)
     pthread_mutex_unlock(&freeze_lock);
     printf(value ? "stopped reading\n" : "reading again\n");
 }
-
 static int send_text(const char *dst, int prio, const char *text)
 {
     struct frame f;
@@ -83,7 +79,6 @@ static int send_text(const char *dst, int prio, const char *text)
     }
     return 0;
 }
-
 int main(int argc, char *argv[])
 {
     struct sockaddr_in addr;
@@ -176,7 +171,6 @@ int main(int argc, char *argv[])
             printf("unknown command\n");
         }
     }
-
     set_frozen(0);
     shutdown(sock, SHUT_RDWR);
     pthread_join(tid, NULL);

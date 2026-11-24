@@ -17,12 +17,10 @@ struct frame
     uint8_t priority;
     uint8_t payload[MAX_PAYLOAD];
 };
-
 ssize_t read_full(int fd, void *buf, size_t n);
 ssize_t write_full(int fd, const void *buf, size_t n);
 int read_frame(int fd, struct frame *f);
 int write_frame(int fd, const struct frame *f);
-
 int parse_mac(const char *s, uint8_t mac[MAC_LEN]);
 void mac_to_str(const uint8_t mac[MAC_LEN], char *buf);
 int is_broadcast(const uint8_t mac[MAC_LEN]);

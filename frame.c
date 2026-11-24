@@ -25,7 +25,6 @@ ssize_t read_full(int fd, void *buf, size_t n)
     }
     return (ssize_t)got;
 }
-
 ssize_t write_full(int fd, const void *buf, size_t n)
 {
     size_t done = 0;
@@ -41,7 +40,6 @@ ssize_t write_full(int fd, const void *buf, size_t n)
     }
     return (ssize_t)done;
 }
-
 int read_frame(int fd, struct frame *f)
 {
     uint8_t hdr[HDR_LEN];
@@ -77,7 +75,6 @@ int read_frame(int fd, struct frame *f)
     }
     return 1;
 }
-
 int write_frame(int fd, const struct frame *f)
 {
     uint8_t buf[HDR_LEN + MAX_PAYLOAD];
@@ -100,7 +97,6 @@ int write_frame(int fd, const struct frame *f)
     }
     return 0;
 }
-
 int parse_mac(const char *s, uint8_t mac[MAC_LEN])
 {
     unsigned int b[MAC_LEN];
@@ -116,12 +112,10 @@ int parse_mac(const char *s, uint8_t mac[MAC_LEN])
     }
     return 0;
 }
-
 void mac_to_str(const uint8_t mac[MAC_LEN], char *buf)
 {
     snprintf(buf, 18, "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
-
 int is_broadcast(const uint8_t mac[MAC_LEN])
 {
     for (int i = 0; i < MAC_LEN; i++)

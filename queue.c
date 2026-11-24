@@ -1,7 +1,6 @@
 /* queue.c - reference counted frames and a bounded queue (mutex + condition variable) per port */
 #define _GNU_SOURCE
 #include "queue.h"
-
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,14 +17,12 @@ struct pkt *pkt_new(const struct frame *f)
     }
     return p;
 }
-
 void pkt_ref(struct pkt *p)
 {
     pthread_mutex_lock(&p->lock);
     p->refcount++;
     pthread_mutex_unlock(&p->lock);
 }
-
 void pkt_unref(struct pkt *p)
 {
     int last;
@@ -40,7 +37,6 @@ void pkt_unref(struct pkt *p)
         free(p);
     }
 }
-
 int queue_init(struct queue *q, int cap)
 {
     memset(q, 0, sizeof *q);
@@ -59,7 +55,6 @@ int queue_init(struct queue *q, int cap)
     }
     return 0;
 }
-
 void queue_destroy(struct queue *q)
 {
     queue_drain(q);
@@ -67,7 +62,6 @@ void queue_destroy(struct queue *q)
     pthread_mutex_destroy(&q->lock);
     free(q->items);
 }
-
 int queue_push(struct queue *q, struct pkt *p)
 {
     pthread_mutex_lock(&q->lock);
@@ -83,7 +77,6 @@ int queue_push(struct queue *q, struct pkt *p)
     pthread_mutex_unlock(&q->lock);
     return 0;
 }
-
 struct pkt *queue_pop(struct queue *q)
 {
     struct pkt *p;
@@ -101,7 +94,6 @@ struct pkt *queue_pop(struct queue *q)
     pthread_mutex_unlock(&q->lock);
     return p;
 }
-
 void queue_close(struct queue *q)
 {
     pthread_mutex_lock(&q->lock);
@@ -109,7 +101,6 @@ void queue_close(struct queue *q)
     pthread_cond_broadcast(&q->not_empty);
     pthread_mutex_unlock(&q->lock);
 }
-
 void queue_drain(struct queue *q)
 {
     pthread_mutex_lock(&q->lock);
@@ -120,7 +111,6 @@ void queue_drain(struct queue *q)
     }
     pthread_mutex_unlock(&q->lock);
 }
-
 void queue_reset(struct queue *q)
 {
     pthread_mutex_lock(&q->lock);
@@ -130,7 +120,6 @@ void queue_reset(struct queue *q)
     q->tail = 0;
     pthread_mutex_unlock(&q->lock);
 }
-
 unsigned long queue_dropped(struct queue *q)
 {
     unsigned long d;
