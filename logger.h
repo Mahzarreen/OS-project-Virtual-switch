@@ -1,0 +1,9 @@
+/* logger.h - log messages are queued by any thread and written to a file by one logger thread */
+#ifndef LOGGER_H
+#define LOGGER_H
+
+int logger_start(const char *path);
+void logger_stop(void);
+void log_msg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+#endif

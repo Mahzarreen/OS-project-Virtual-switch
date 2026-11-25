@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "admin.h"
 #include "switch.h"
+#include "logger.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -75,6 +76,7 @@ static void handle_client(int c)
         perror("open_memstream");
         return;
     }
+    log_msg("admin: %s", line);
     run_command(line, out);
     fclose(out);
 

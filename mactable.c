@@ -1,6 +1,7 @@
 /* mactable.c - striped-lock MAC table: learning, lookup, host moves, aging thread and LRU eviction */
 #define _GNU_SOURCE
 #include "mactable.h"
+#include "logger.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -96,7 +97,7 @@ static void evict_oldest(struct mac_table *t)
             char s[18];
             *pp = e->next;
             mac_to_str(e->mac, s);
-            printf("mac table full, evicted %s\n", s);
+            log_msg("mac table full, evicted %s", s);
             forget_entry(t, e);
             break;
         }
@@ -233,7 +234,7 @@ static void remove_entries(struct mac_table *t, int mode, int port, time_t older
             if (remove) {
                 char s[18];
                 mac_to_str(e->mac, s);
-                printf("mac %s removed (%s)\n", s, reason[mode]);
+                log_msg("mac %s removed (%s)", s, reason[mode]);
                 *pp = e->next;
                 forget_entry(t, e);
             } else {
@@ -242,7 +243,6 @@ static void remove_entries(struct mac_table *t, int mode, int port, time_t older
         }
         pthread_mutex_unlock(&t->bucket_lock[b]);
     }
-    fflush(stdout);
 }
 
 void mac_remove_port(struct mac_table *t, int port)
@@ -288,12 +288,25 @@ static void *aging_thread(void *arg)
             break;
         if (t->stopping)
             break;
+        int age = t->age_seconds;
         pthread_mutex_unlock(&t->stop_lock);
-        remove_entries(t, RM_AGED, -1, now_sec() - t->age_seconds);
+        remove_entries(t, RM_AGED, -1, now_sec() - age);
         pthread_mutex_lock(&t->stop_lock);
     }
     pthread_mutex_unlock(&t->stop_lock);
     return NULL;
+}
+
+void mac_table_set_limits(struct mac_table *t, int max_entries, int max_per_port, int age_seconds)
+{
+    pthread_mutex_lock(&t->count_lock);
+    t->max_entries = max_entries;
+    t->max_per_port = max_per_port;
+    pthread_mutex_unlock(&t->count_lock);
+
+    pthread_mutex_lock(&t->stop_lock);
+    t->age_seconds = age_seconds;
+    pthread_mutex_unlock(&t->stop_lock);
 }
 
 int mac_table_start_aging(struct mac_table *t)

@@ -3,8 +3,8 @@ CC = gcc
 CFLAGS = -std=c11 -Wall -Wextra -Werror -g -O0 -pthread
 LDLIBS = -lrt
 
-SWITCH_SRC = switch.c queue.c mactable.c config.c stats.c admin.c frame.c
-SWITCH_HDR = switch.h queue.h mactable.h config.h stats.h admin.h frame.h
+SWITCH_SRC = switch.c queue.c mactable.c config.c stats.c admin.c logger.c frame.c
+SWITCH_HDR = switch.h queue.h mactable.h config.h stats.h admin.h logger.h frame.h
 HOST_SRC = host.c frame.c
 SWCTL_SRC = swctl.c stats.c
 

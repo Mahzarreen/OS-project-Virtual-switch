@@ -13,6 +13,7 @@ long long now_ms(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
+
 struct pkt *pkt_new(const struct frame *f)
 {
     struct pkt *p = malloc(sizeof *p);
@@ -27,6 +28,7 @@ struct pkt *pkt_new(const struct frame *f)
     }
     return p;
 }
+
 void pkt_ref(struct pkt *p)
 {
     pthread_mutex_lock(&p->lock);
@@ -220,6 +222,21 @@ void queue_reset(struct queue *q)
         q->ring[c].tail = 0;
         q->credit[c] = q->weight[c];
     }
+    pthread_mutex_unlock(&q->lock);
+}
+
+void queue_set_limits(struct queue *q, int rate, const int weights[NUM_PRIO])
+{
+    pthread_mutex_lock(&q->lock);
+    q->rate = rate;
+    if (q->tokens > rate)
+        q->tokens = rate;
+    for (int c = 0; c < NUM_PRIO; c++) {
+        q->weight[c] = weights[c];
+        if (q->credit[c] > weights[c])
+            q->credit[c] = weights[c];
+    }
+    pthread_cond_broadcast(&q->has_tokens);
     pthread_mutex_unlock(&q->lock);
 }
 

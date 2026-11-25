@@ -52,6 +52,7 @@ void queue_refill(struct queue *q);
 void queue_close(struct queue *q);
 void queue_drain(struct queue *q);
 void queue_reset(struct queue *q);
+void queue_set_limits(struct queue *q, int rate, const int weights[NUM_PRIO]);
 unsigned long queue_dropped(struct queue *q);
 
 #endif

@@ -1,8 +1,9 @@
-/* switch.c - stage 5: forwarding, VLANs, mirroring, port lifecycle and live port reconfiguration */
+/* switch.c - the switch: forwarding, VLANs, mirroring, port lifecycle, signal thread and clean shutdown */
 #define _GNU_SOURCE
 #include "switch.h"
 #include "stats.h"
 #include "admin.h"
+#include "logger.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -26,6 +27,12 @@ static pthread_mutex_t stop_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t stop_cond = PTHREAD_COND_INITIALIZER;
 static pthread_t rate_tid;
 static pthread_cond_t port_done = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t cfg_lock = PTHREAD_MUTEX_INITIALIZER;
+static int running = 1;
+static pthread_mutex_t run_lock = PTHREAD_MUTEX_INITIALIZER;
+static int listener = -1;
+static pthread_t sig_tid;
+static const char *config_path;
 
 static void mirror_push(int sniffer, int from, struct pkt *pk)
 {
@@ -121,11 +128,9 @@ static int learn(int port, const struct frame *f)
     r = mac_learn(&mac_table, f->src, port, &old_port);
     mac_to_str(f->src, src);
     if (r == MAC_MOVED) {
-        printf("MAC moved: %s from port %d to port %d\n", src, old_port + 1, port + 1);
-        fflush(stdout);
+        log_msg("MAC moved: %s from port %d to port %d", src, old_port + 1, port + 1);
     } else if (r == MAC_VIOLATION) {
-        printf("port %d: too many MACs (%s), port disabled\n", port + 1, src);
-        fflush(stdout);
+        log_msg("port %d: too many MACs (%s), port disabled", port + 1, src);
         return -1;
     }
     return 0;
@@ -152,7 +157,7 @@ static void *sender(void *arg)
         r = write_frame(p->fd, &pk->f);
         pkt_unref(pk);
         if (r < 0) {
-            fprintf(stderr, "port %d: write failed: %s\n", p->id + 1, strerror(errno));
+            log_msg("port %d: write failed: %s", p->id + 1, strerror(errno));
             shutdown(p->fd, SHUT_RDWR);
             break;
         }
@@ -175,14 +180,13 @@ static void *receiver(void *arg)
             break;
         stats_inc(p->id, STAT_IN);
         if (set_frame_vlan(p, &f) < 0) {
-            printf("port %d: bad vlan %u on trunk, frame dropped\n", p->id + 1, f.vlan);
+            log_msg("port %d: bad vlan %u on trunk, frame dropped", p->id + 1, f.vlan);
             continue;
         }
         mac_to_str(f.src, src);
         mac_to_str(f.dst, dst);
-        printf("port %d: %s -> %s vlan %u prio %u (%u bytes)\n",
+        log_msg("port %d: %s -> %s vlan %u prio %u (%u bytes)",
                p->id + 1, src, dst, f.vlan, f.priority, f.length);
-        fflush(stdout);
         if (learn(p->id, &f) < 0) {
             disable_port(p);
             break;
@@ -190,7 +194,7 @@ static void *receiver(void *arg)
 
         pk = pkt_new(&f);
         if (pk == NULL) {
-            fprintf(stderr, "out of memory, frame dropped\n");
+            log_msg("out of memory, frame dropped");
             continue;
         }
         mirror = mirror_target(p);
@@ -210,9 +214,8 @@ static void *receiver(void *arg)
     close(p->fd);
     mac_remove_port(&mac_table, p->id);
 
-    printf("port %d: host disconnected (%lu frames dropped)\n",
+    log_msg("port %d: host disconnected (%lu frames dropped)",
            p->id + 1, queue_dropped(&p->q));
-    fflush(stdout);
 
     pthread_mutex_lock(&ports_lock);
     p->state = PORT_DONE;
@@ -275,7 +278,9 @@ static int wait_for_port(void)
         perror("clock_gettime");
         return -1;
     }
+    pthread_mutex_lock(&cfg_lock);
     ts.tv_sec += cfg.port_wait;
+    pthread_mutex_unlock(&cfg_lock);
     while (sem_timedwait(&free_ports, &ts) < 0) {
         if (errno == EINTR)
             continue;
@@ -333,14 +338,8 @@ static int start_port(struct port *p, int fd)
     return 0;
 }
 
-int port_shutdown(int idx)
+static void stop_port(struct port *p)
 {
-    struct port *p;
-
-    if (idx < 0 || idx >= num_ports)
-        return -1;
-    p = &ports[idx];
-
     pthread_mutex_lock(&ports_lock);
     pthread_mutex_lock(&p->lock);
     p->disabled = 1;
@@ -355,9 +354,14 @@ int port_shutdown(int idx)
         p->state = PORT_FREE;
     }
     pthread_mutex_unlock(&ports_lock);
+}
 
-    printf("port %d shut down by admin\n", idx + 1);
-    fflush(stdout);
+int port_shutdown(int idx)
+{
+    if (idx < 0 || idx >= num_ports)
+        return -1;
+    stop_port(&ports[idx]);
+    log_msg("port %d shut down by admin", idx + 1);
     return 0;
 }
 
@@ -370,8 +374,7 @@ int port_enable(int idx)
     ports[idx].disabled = 0;
     pthread_mutex_unlock(&ports[idx].lock);
     pthread_mutex_unlock(&ports_lock);
-    printf("port %d enabled by admin\n", idx + 1);
-    fflush(stdout);
+    log_msg("port %d enabled by admin", idx + 1);
     return 0;
 }
 
@@ -383,8 +386,7 @@ int port_set_vlan(int idx, int vlan)
     ports[idx].vlan = vlan;
     pthread_mutex_unlock(&ports[idx].lock);
     mac_remove_port(&mac_table, idx);
-    printf("port %d moved to vlan %d\n", idx + 1, vlan);
-    fflush(stdout);
+    log_msg("port %d moved to vlan %d", idx + 1, vlan);
     return 0;
 }
 
@@ -491,9 +493,138 @@ static int make_listener(int tcp_port)
     return s;
 }
 
+static int is_running(void)
+{
+    int r;
+    pthread_mutex_lock(&run_lock);
+    r = running;
+    pthread_mutex_unlock(&run_lock);
+    return r;
+}
+
+static void request_stop(void)
+{
+    pthread_mutex_lock(&run_lock);
+    running = 0;
+    pthread_mutex_unlock(&run_lock);
+    shutdown(listener, SHUT_RDWR);
+    sem_post(&free_ports);
+}
+
+static void reload_config(void)
+{
+    struct config fresh;
+
+    config_defaults(&fresh);
+    if (config_path == NULL) {
+        log_msg("SIGHUP: no config file given, nothing to reload");
+        return;
+    }
+    if (config_load(&fresh, config_path, num_ports) < 0) {
+        log_msg("SIGHUP: %s has errors, keeping the old config", config_path);
+        return;
+    }
+
+    pthread_mutex_lock(&cfg_lock);
+    if (fresh.queue_size != cfg.queue_size)
+        log_msg("SIGHUP: queue_size only changes after a restart");
+    fresh.queue_size = cfg.queue_size;
+    cfg = fresh;
+    pthread_mutex_unlock(&cfg_lock);
+
+    mac_table_set_limits(&mac_table, fresh.mac_max, fresh.mac_per_port, fresh.mac_age);
+    for (int i = 0; i < num_ports; i++) {
+        struct port *p = &ports[i];
+        int changed;
+
+        queue_set_limits(&p->q, fresh.rate_limit, fresh.weights);
+        pthread_mutex_lock(&p->lock);
+        changed = (p->vlan != fresh.port_vlan[i]) || (p->trunk != (i == fresh.trunk_port));
+        p->vlan = fresh.port_vlan[i];
+        p->trunk = (i == fresh.trunk_port);
+        pthread_mutex_unlock(&p->lock);
+        if (changed)
+            mac_remove_port(&mac_table, i);
+    }
+    log_msg("SIGHUP: config reloaded from %s", config_path);
+}
+
+static void dump_mac_table(void)
+{
+    FILE *fp = fopen(MAC_DUMP_FILE, "w");
+    if (fp == NULL) {
+        log_msg("SIGUSR1: cannot open %s: %s", MAC_DUMP_FILE, strerror(errno));
+        return;
+    }
+    mac_dump(&mac_table, fp);
+    if (fclose(fp) != 0)
+        log_msg("SIGUSR1: error writing %s", MAC_DUMP_FILE);
+    else
+        log_msg("SIGUSR1: mac table written to %s", MAC_DUMP_FILE);
+}
+
+static void *signal_thread(void *arg)
+{
+    sigset_t *set = arg;
+
+    for (;;) {
+        int sig;
+        if (sigwait(set, &sig) != 0)
+            continue;
+        if (sig == SIGINT || sig == SIGTERM) {
+            log_msg("got %s, shutting down", sig == SIGINT ? "SIGINT" : "SIGTERM");
+            request_stop();
+            break;
+        } else if (sig == SIGHUP) {
+            reload_config();
+        } else if (sig == SIGUSR1) {
+            dump_mac_table();
+        }
+    }
+    return NULL;
+}
+
+static void accept_loop(void)
+{
+    while (is_running()) {
+        int idx;
+        int c = accept(listener, NULL, NULL);
+        if (c < 0) {
+            if (!is_running())
+                break;
+            if (errno == EINTR || errno == ECONNABORTED)
+                continue;
+            log_msg("accept failed: %s, shutting down", strerror(errno));
+            kill(getpid(), SIGTERM);
+            break;
+        }
+
+        if (wait_for_port() < 0) {
+            log_msg("switch full, rejecting host");
+            send_switch_full(c);
+            close(c);
+            continue;
+        }
+        if (!is_running()) {
+            close(c);
+            break;
+        }
+        idx = find_free_port();
+        if (idx < 0) {
+            sem_post(&free_ports);
+            log_msg("no enabled port free, rejecting host");
+            send_switch_full(c);
+            close(c);
+            continue;
+        }
+        if (start_port(&ports[idx], c) == 0)
+            log_msg("host connected on port %d", idx + 1);
+    }
+}
+
 int main(int argc, char *argv[])
 {
-    int listener;
+    sigset_t set;
 
     if (argc != 3 && argc != 4) {
         fprintf(stderr, "usage: %s <tcp_port> <num_ports> [config_file]\n", argv[0]);
@@ -505,13 +636,32 @@ int main(int argc, char *argv[])
         return 1;
     }
     config_defaults(&cfg);
-    if (argc == 4 && config_load(&cfg, argv[3], num_ports) < 0)
-        return 1;
+    if (argc == 4) {
+        config_path = argv[3];
+        if (config_load(&cfg, config_path, num_ports) < 0)
+            return 1;
+    }
 
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
         perror("signal");
         return 1;
     }
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    sigaddset(&set, SIGTERM);
+    sigaddset(&set, SIGHUP);
+    sigaddset(&set, SIGUSR1);
+    if (signal(SIGINT, SIG_DFL) == SIG_ERR || signal(SIGHUP, SIG_DFL) == SIG_ERR) {
+        perror("signal");
+        return 1;
+    }
+    if (pthread_sigmask(SIG_BLOCK, &set, NULL) != 0) {
+        fprintf(stderr, "pthread_sigmask failed\n");
+        return 1;
+    }
+
+    if (logger_start(LOG_FILE) < 0)
+        return 1;
 
     ports = calloc((size_t)num_ports, sizeof *ports);
     if (ports == NULL) {
@@ -540,56 +690,34 @@ int main(int argc, char *argv[])
         fprintf(stderr, "mac table init failed\n");
         return 1;
     }
-
     if (stats_create(num_ports) < 0)
         return 1;
-    if (admin_start() < 0)
-        return 1;
-
-    if (pthread_create(&rate_tid, NULL, rate_thread, NULL) != 0) {
-        fprintf(stderr, "cannot start rate limit thread\n");
-        return 1;
-    }
 
     listener = make_listener(atoi(argv[1]));
     if (listener < 0)
         return 1;
-    printf("switch listening on port %s with %d ports\n", argv[1], num_ports);
-    fflush(stdout);
-
-    for (;;) {
-        int idx;
-        int c = accept(listener, NULL, NULL);
-        if (c < 0) {
-            if (errno == EINTR)
-                continue;
-            perror("accept");
-            break;
-        }
-
-        if (wait_for_port() < 0) {
-            printf("switch full, rejecting host\n");
-            fflush(stdout);
-            send_switch_full(c);
-            close(c);
-            continue;
-        }
-        idx = find_free_port();
-        if (idx < 0) {
-            sem_post(&free_ports);
-            close(c);
-            continue;
-        }
-        if (start_port(&ports[idx], c) == 0) {
-            printf("host connected on port %d\n", idx + 1);
-            fflush(stdout);
-        }
+    if (admin_start() < 0)
+        return 1;
+    if (pthread_create(&rate_tid, NULL, rate_thread, NULL) != 0 ||
+        pthread_create(&sig_tid, NULL, signal_thread, &set) != 0) {
+        fprintf(stderr, "cannot start threads\n");
+        return 1;
     }
+    log_msg("switch listening on port %s with %d ports (pid %d)", argv[1], num_ports, (int)getpid());
 
+    accept_loop();
+
+    log_msg("stopping: closing admin socket and all ports");
     close(listener);
     admin_stop();
+    for (int i = 0; i < num_ports; i++)
+        stop_port(&ports[i]);
     stop_rate_thread();
     mac_table_stop_aging(&mac_table);
+    pthread_join(sig_tid, NULL);
+    log_msg("switch stopped cleanly");
+    logger_stop();
+
     mac_table_destroy(&mac_table);
     sem_destroy(&free_ports);
     for (int i = 0; i < num_ports; i++) {

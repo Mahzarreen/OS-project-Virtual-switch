@@ -1,7 +1,9 @@
-# build outputs
+# build outputs and editor settings
 switch
 host
 swctl
 switch_tsan
 *.o
 *.log
+mac_dump.txt
+.vscode/

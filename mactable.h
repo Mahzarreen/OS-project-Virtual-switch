@@ -39,6 +39,7 @@ struct mac_table {
 };
 
 int mac_table_init(struct mac_table *t, int num_ports, int max_entries, int max_per_port, int age_seconds);
+void mac_table_set_limits(struct mac_table *t, int max_entries, int max_per_port, int age_seconds);
 int mac_table_start_aging(struct mac_table *t);
 void mac_table_stop_aging(struct mac_table *t);
 void mac_table_destroy(struct mac_table *t);

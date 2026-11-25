@@ -9,6 +9,9 @@
 #include "mactable.h"
 #include "config.h"
 
+#define LOG_FILE "switch.log"
+#define MAC_DUMP_FILE "mac_dump.txt"
+
 enum { PORT_FREE, PORT_BUSY, PORT_DONE };
 
 struct port {
