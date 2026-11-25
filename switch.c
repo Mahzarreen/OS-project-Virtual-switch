@@ -1,6 +1,8 @@
-/* switch.c - stage 4: MAC learning, forwarding within a VLAN, trunk port, rate limit timer thread */
+/* switch.c - stage 5: forwarding, VLANs, mirroring, port lifecycle and live port reconfiguration */
 #define _GNU_SOURCE
 #include "switch.h"
+#include "stats.h"
+#include "admin.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -23,44 +25,71 @@ static int stopping;
 static pthread_mutex_t stop_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t stop_cond = PTHREAD_COND_INITIALIZER;
 static pthread_t rate_tid;
+static pthread_cond_t port_done = PTHREAD_COND_INITIALIZER;
+
+static void mirror_push(int sniffer, int from, struct pkt *pk)
+{
+    struct port *s = &ports[sniffer];
+
+    pthread_mutex_lock(&s->lock);
+    if (s->up) {
+        pkt_ref(pk);
+        if (queue_push(&s->q, pk) < 0) {
+            pkt_unref(pk);
+            stats_inc(sniffer, STAT_DROPPED);
+        } else {
+            stats_inc(from, STAT_MIRRORED);
+        }
+    }
+    pthread_mutex_unlock(&s->lock);
+}
+
+static int mirror_target(struct port *p)
+{
+    int m;
+    pthread_mutex_lock(&p->lock);
+    m = p->mirror_to;
+    pthread_mutex_unlock(&p->lock);
+    return m;
+}
 
 static int enqueue_to_port(struct port *p, struct pkt *pk)
 {
     int ok = -1;
+    int mirror = -1;
 
     pthread_mutex_lock(&p->lock);
     if (p->up && (p->trunk || p->vlan == pk->f.vlan)) {
         ok = 0;
+        mirror = p->mirror_to;
         pkt_ref(pk);
-        if (queue_push(&p->q, pk) < 0)
+        if (queue_push(&p->q, pk) < 0) {
             pkt_unref(pk);
+            stats_inc(p->id, STAT_DROPPED);
+        }
     }
     pthread_mutex_unlock(&p->lock);
+
+    if (mirror >= 0)
+        mirror_push(mirror, p->id, pk);
     return ok;
 }
 
-static void forward(int from, const struct frame *f)
+static void forward(int from, struct pkt *pk)
 {
-    struct pkt *pk;
     int out = -1;
 
-    if (!is_broadcast(f->dst))
-        out = mac_lookup(&mac_table, f->dst);
+    if (!is_broadcast(pk->f.dst))
+        out = mac_lookup(&mac_table, pk->f.dst);
     if (out == from)
         return;
 
-    pk = pkt_new(f);
-    if (pk == NULL) {
-        fprintf(stderr, "out of memory, frame dropped\n");
-        return;
-    }
     if (out < 0 || enqueue_to_port(&ports[out], pk) < 0) {
         for (int i = 0; i < num_ports; i++) {
             if (i != from)
                 enqueue_to_port(&ports[i], pk);
         }
     }
-    pkt_unref(pk);
 }
 
 static int set_frame_vlan(struct port *p, struct frame *f)
@@ -95,11 +124,20 @@ static int learn(int port, const struct frame *f)
         printf("MAC moved: %s from port %d to port %d\n", src, old_port + 1, port + 1);
         fflush(stdout);
     } else if (r == MAC_VIOLATION) {
-        printf("port %d: too many MACs (%s), shutting port down\n", port + 1, src);
+        printf("port %d: too many MACs (%s), port disabled\n", port + 1, src);
         fflush(stdout);
         return -1;
     }
     return 0;
+}
+
+static void disable_port(struct port *p)
+{
+    pthread_mutex_lock(&ports_lock);
+    pthread_mutex_lock(&p->lock);
+    p->disabled = 1;
+    pthread_mutex_unlock(&p->lock);
+    pthread_mutex_unlock(&ports_lock);
 }
 
 static void *sender(void *arg)
@@ -118,6 +156,7 @@ static void *sender(void *arg)
             shutdown(p->fd, SHUT_RDWR);
             break;
         }
+        stats_inc(p->id, STAT_OUT);
     }
     return NULL;
 }
@@ -129,9 +168,12 @@ static void *receiver(void *arg)
     char src[18], dst[18];
 
     for (;;) {
+        struct pkt *pk;
+        int mirror;
         int r = read_frame(p->fd, &f);
         if (r <= 0)
             break;
+        stats_inc(p->id, STAT_IN);
         if (set_frame_vlan(p, &f) < 0) {
             printf("port %d: bad vlan %u on trunk, frame dropped\n", p->id + 1, f.vlan);
             continue;
@@ -141,9 +183,21 @@ static void *receiver(void *arg)
         printf("port %d: %s -> %s vlan %u prio %u (%u bytes)\n",
                p->id + 1, src, dst, f.vlan, f.priority, f.length);
         fflush(stdout);
-        if (learn(p->id, &f) < 0)
+        if (learn(p->id, &f) < 0) {
+            disable_port(p);
             break;
-        forward(p->id, &f);
+        }
+
+        pk = pkt_new(&f);
+        if (pk == NULL) {
+            fprintf(stderr, "out of memory, frame dropped\n");
+            continue;
+        }
+        mirror = mirror_target(p);
+        if (mirror >= 0)
+            mirror_push(mirror, p->id, pk);
+        forward(p->id, pk);
+        pkt_unref(pk);
     }
 
     pthread_mutex_lock(&p->lock);
@@ -161,7 +215,8 @@ static void *receiver(void *arg)
     fflush(stdout);
 
     pthread_mutex_lock(&ports_lock);
-    p->used = 0;
+    p->state = PORT_DONE;
+    pthread_cond_broadcast(&port_done);
     pthread_mutex_unlock(&ports_lock);
     sem_post(&free_ports);
     return NULL;
@@ -170,15 +225,21 @@ static void *receiver(void *arg)
 static int find_free_port(void)
 {
     int found = -1;
+    int was_done = 0;
+
     pthread_mutex_lock(&ports_lock);
     for (int i = 0; i < num_ports; i++) {
-        if (!ports[i].used) {
-            ports[i].used = 1;
+        if (!ports[i].disabled && ports[i].state != PORT_BUSY) {
+            was_done = (ports[i].state == PORT_DONE);
+            ports[i].state = PORT_BUSY;
             found = i;
             break;
         }
     }
     pthread_mutex_unlock(&ports_lock);
+
+    if (found >= 0 && was_done)
+        pthread_join(ports[found].rx, NULL);
     return found;
 }
 
@@ -186,7 +247,8 @@ static void release_port(struct port *p)
 {
     close(p->fd);
     pthread_mutex_lock(&ports_lock);
-    p->used = 0;
+    p->state = PORT_FREE;
+    pthread_cond_broadcast(&port_done);
     pthread_mutex_unlock(&ports_lock);
     sem_post(&free_ports);
 }
@@ -224,36 +286,146 @@ static int wait_for_port(void)
     return 0;
 }
 
+static void stop_sender(struct port *p)
+{
+    pthread_mutex_lock(&p->lock);
+    p->up = 0;
+    pthread_mutex_unlock(&p->lock);
+    queue_close(&p->q);
+    pthread_join(p->tx, NULL);
+    queue_drain(&p->q);
+}
+
 static int start_port(struct port *p, int fd)
 {
-    pthread_t rx;
+    int r;
 
     p->fd = fd;
     queue_reset(&p->q);
 
-    if (pthread_create(&p->tx, NULL, sender, p) != 0) {
-        fprintf(stderr, "port %d: cannot create sender\n", p->id + 1);
+    pthread_mutex_lock(&p->lock);
+    if (p->disabled) {
+        pthread_mutex_unlock(&p->lock);
         release_port(p);
         return -1;
     }
-
-    pthread_mutex_lock(&p->lock);
     p->up = 1;
     pthread_mutex_unlock(&p->lock);
 
-    if (pthread_create(&rx, NULL, receiver, p) != 0) {
-        fprintf(stderr, "port %d: cannot create receiver\n", p->id + 1);
+    if (pthread_create(&p->tx, NULL, sender, p) != 0) {
+        fprintf(stderr, "port %d: cannot create sender\n", p->id + 1);
         pthread_mutex_lock(&p->lock);
         p->up = 0;
         pthread_mutex_unlock(&p->lock);
-        queue_close(&p->q);
-        pthread_join(p->tx, NULL);
-        queue_drain(&p->q);
         release_port(p);
         return -1;
     }
-    pthread_detach(rx);
+
+    pthread_mutex_lock(&ports_lock);
+    r = pthread_create(&p->rx, NULL, receiver, p);
+    pthread_mutex_unlock(&ports_lock);
+    if (r != 0) {
+        fprintf(stderr, "port %d: cannot create receiver\n", p->id + 1);
+        stop_sender(p);
+        release_port(p);
+        return -1;
+    }
     return 0;
+}
+
+int port_shutdown(int idx)
+{
+    struct port *p;
+
+    if (idx < 0 || idx >= num_ports)
+        return -1;
+    p = &ports[idx];
+
+    pthread_mutex_lock(&ports_lock);
+    pthread_mutex_lock(&p->lock);
+    p->disabled = 1;
+    if (p->up)
+        shutdown(p->fd, SHUT_RDWR);
+    pthread_mutex_unlock(&p->lock);
+
+    while (p->state == PORT_BUSY)
+        pthread_cond_wait(&port_done, &ports_lock);
+    if (p->state == PORT_DONE) {
+        pthread_join(p->rx, NULL);
+        p->state = PORT_FREE;
+    }
+    pthread_mutex_unlock(&ports_lock);
+
+    printf("port %d shut down by admin\n", idx + 1);
+    fflush(stdout);
+    return 0;
+}
+
+int port_enable(int idx)
+{
+    if (idx < 0 || idx >= num_ports)
+        return -1;
+    pthread_mutex_lock(&ports_lock);
+    pthread_mutex_lock(&ports[idx].lock);
+    ports[idx].disabled = 0;
+    pthread_mutex_unlock(&ports[idx].lock);
+    pthread_mutex_unlock(&ports_lock);
+    printf("port %d enabled by admin\n", idx + 1);
+    fflush(stdout);
+    return 0;
+}
+
+int port_set_vlan(int idx, int vlan)
+{
+    if (idx < 0 || idx >= num_ports || vlan < 1 || vlan > 4094)
+        return -1;
+    pthread_mutex_lock(&ports[idx].lock);
+    ports[idx].vlan = vlan;
+    pthread_mutex_unlock(&ports[idx].lock);
+    mac_remove_port(&mac_table, idx);
+    printf("port %d moved to vlan %d\n", idx + 1, vlan);
+    fflush(stdout);
+    return 0;
+}
+
+int port_set_mirror(int idx, int target)
+{
+    if (idx < 0 || idx >= num_ports || target < -1 || target >= num_ports || target == idx)
+        return -1;
+    pthread_mutex_lock(&ports[idx].lock);
+    ports[idx].mirror_to = target;
+    pthread_mutex_unlock(&ports[idx].lock);
+    return 0;
+}
+
+void port_show(FILE *out)
+{
+    fprintf(out, "%-5s %-9s %-6s %-6s %s\n", "PORT", "STATE", "VLAN", "TRUNK", "MIRROR");
+    pthread_mutex_lock(&ports_lock);
+    for (int i = 0; i < num_ports; i++) {
+        struct port *p = &ports[i];
+        const char *state;
+        int vlan, trunk, mirror;
+
+        pthread_mutex_lock(&p->lock);
+        if (p->disabled)
+            state = "disabled";
+        else if (p->up)
+            state = "up";
+        else
+            state = "free";
+        vlan = p->vlan;
+        trunk = p->trunk;
+        mirror = p->mirror_to;
+        pthread_mutex_unlock(&p->lock);
+
+        fprintf(out, "%-5d %-9s %-6d %-6s ", i + 1, state, vlan, trunk ? "yes" : "no");
+        if (mirror >= 0)
+            fprintf(out, "-> %d\n", mirror + 1);
+        else
+            fprintf(out, "-\n");
+    }
+    pthread_mutex_unlock(&ports_lock);
 }
 
 static void *rate_thread(void *arg)
@@ -351,6 +523,7 @@ int main(int argc, char *argv[])
         ports[i].fd = -1;
         ports[i].vlan = cfg.port_vlan[i];
         ports[i].trunk = (i == cfg.trunk_port);
+        ports[i].mirror_to = -1;
         if (pthread_mutex_init(&ports[i].lock, NULL) != 0 ||
             queue_init(&ports[i].q, cfg.queue_size, cfg.weights, cfg.rate_limit) != 0) {
             fprintf(stderr, "port init failed\n");
@@ -367,6 +540,11 @@ int main(int argc, char *argv[])
         fprintf(stderr, "mac table init failed\n");
         return 1;
     }
+
+    if (stats_create(num_ports) < 0)
+        return 1;
+    if (admin_start() < 0)
+        return 1;
 
     if (pthread_create(&rate_tid, NULL, rate_thread, NULL) != 0) {
         fprintf(stderr, "cannot start rate limit thread\n");
@@ -409,6 +587,7 @@ int main(int argc, char *argv[])
     }
 
     close(listener);
+    admin_stop();
     stop_rate_thread();
     mac_table_stop_aging(&mac_table);
     mac_table_destroy(&mac_table);
@@ -418,5 +597,6 @@ int main(int argc, char *argv[])
         pthread_mutex_destroy(&ports[i].lock);
     }
     free(ports);
+    stats_destroy();
     return 0;
 }
