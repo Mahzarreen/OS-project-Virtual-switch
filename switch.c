@@ -4,7 +4,6 @@
 #include "stats.h"
 #include "admin.h"
 #include "logger.h"
-
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -699,14 +698,13 @@ int main(int argc, char *argv[])
     if (admin_start() < 0)
         return 1;
     if (pthread_create(&rate_tid, NULL, rate_thread, NULL) != 0 ||
-        pthread_create(&sig_tid, NULL, signal_thread, &set) != 0) {
+        pthread_create(&sig_tid, NULL, signal_thread, &set) != 0) 
+    {
         fprintf(stderr, "cannot start threads\n");
         return 1;
     }
     log_msg("switch listening on port %s with %d ports (pid %d)", argv[1], num_ports, (int)getpid());
-
     accept_loop();
-
     log_msg("stopping: closing admin socket and all ports");
     close(listener);
     admin_stop();
@@ -717,10 +715,10 @@ int main(int argc, char *argv[])
     pthread_join(sig_tid, NULL);
     log_msg("switch stopped cleanly");
     logger_stop();
-
     mac_table_destroy(&mac_table);
     sem_destroy(&free_ports);
-    for (int i = 0; i < num_ports; i++) {
+    for (int i = 0; i < num_ports; i++) 
+    {
         queue_destroy(&ports[i].q);
         pthread_mutex_destroy(&ports[i].lock);
     }

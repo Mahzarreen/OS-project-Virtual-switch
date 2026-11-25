@@ -21,16 +21,13 @@ static void usage(const char *prog)
             "  mirror <port> <sniffer_port>   (sniffer_port 0 stops mirroring)\n"
             "  stats [--watch]\n", prog);
 }
-
 static void print_stats(struct switch_stats *s)
 {
     struct switch_stats copy;
-
     pthread_mutex_lock(&s->lock);
     copy.num_ports = s->num_ports;
     memcpy(copy.port, s->port, sizeof copy.port);
     pthread_mutex_unlock(&s->lock);
-
     printf("%-5s %10s %10s %10s %10s\n", "PORT", "IN", "OUT", "DROPPED", "MIRRORED");
     for (int i = 0; i < copy.num_ports && i < MAX_PORTS; i++)
         printf("%-5d %10lu %10lu %10lu %10lu\n", i + 1,
@@ -40,23 +37,27 @@ static void print_stats(struct switch_stats *s)
 static int do_stats(int watch)
 {
     struct switch_stats *s = stats_open();
-    if (s == NULL) {
+    if (s == NULL) 
+    {
         fprintf(stderr, "cannot open shared memory, is the switch running?\n");
         return 1;
     }
-    if (!watch) {
+    if (!watch) 
+    {
         print_stats(s);
         stats_close(s);
         return 0;
     }
-    for (;;) {
+    for (;;) 
+    {
         struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
         printf("\033[H\033[J");
         print_stats(s);
         printf("\npress Enter to quit\n");
         fflush(stdout);
         int r = poll(&pfd, 1, 1000);
-        if (r < 0 && errno != EINTR) {
+        if (r < 0 && errno != EINTR) 
+        {
             perror("poll");
             break;
         }
@@ -74,24 +75,27 @@ static int send_command(const char *cmd)
     ssize_t n;
     int s = socket(AF_UNIX, SOCK_STREAM, 0);
 
-    if (s < 0) {
+    if (s < 0) 
+    {
         perror("socket");
         return 1;
     }
     memset(&addr, 0, sizeof addr);
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, ADMIN_SOCKET, sizeof addr.sun_path - 1);
-    if (connect(s, (struct sockaddr *)&addr, sizeof addr) < 0) {
+    if (connect(s, (struct sockaddr *)&addr, sizeof addr) < 0) 
+    {
         perror("connect (is the switch running?)");
         close(s);
         return 1;
     }
-
     size_t len = strlen(cmd);
     size_t done = 0;
-    while (done < len) {
+    while (done < len) 
+    {
         ssize_t w = write(s, cmd + done, len - done);
-        if (w < 0) {
+        if (w < 0) 
+        {
             if (errno == EINTR)
                 continue;
             perror("write");
@@ -102,9 +106,10 @@ static int send_command(const char *cmd)
     }
     if (shutdown(s, SHUT_WR) < 0)
         perror("shutdown");
-
-    while ((n = read(s, buf, sizeof buf)) != 0) {
-        if (n < 0) {
+    while ((n = read(s, buf, sizeof buf)) != 0) 
+    {
+        if (n < 0) 
+        {
             if (errno == EINTR)
                 continue;
             perror("read");
@@ -119,16 +124,17 @@ static int send_command(const char *cmd)
 int main(int argc, char *argv[])
 {
     char cmd[256] = "";
-
-    if (argc < 2) {
+    if (argc < 2) 
+    {
         usage(argv[0]);
         return 1;
     }
     if (strcmp(argv[1], "stats") == 0)
         return do_stats(argc > 2 && strcmp(argv[2], "--watch") == 0);
-
-    for (int i = 1; i < argc; i++) {
-        if (strlen(cmd) + strlen(argv[i]) + 2 > sizeof cmd) {
+    for (int i = 1; i < argc; i++) 
+    {
+        if (strlen(cmd) + strlen(argv[i]) + 2 > sizeof cmd) 
+        {
             fprintf(stderr, "command too long\n");
             return 1;
         }

@@ -43,7 +43,6 @@ long long now_ms(void);
 struct pkt *pkt_new(const struct frame *f);
 void pkt_ref(struct pkt *p);
 void pkt_unref(struct pkt *p);
-
 int queue_init(struct queue *q, int cap, const int weights[NUM_PRIO], int rate);
 void queue_destroy(struct queue *q);
 int queue_push(struct queue *q, struct pkt *p);

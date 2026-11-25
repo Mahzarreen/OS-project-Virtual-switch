@@ -14,7 +14,8 @@
 
 enum { PORT_FREE, PORT_BUSY, PORT_DONE };
 
-struct port {
+struct port 
+{
     int id;
     int state;
     int disabled;

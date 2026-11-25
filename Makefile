@@ -1,4 +1,4 @@
-# Makefile - builds the switch, the test host, the swctl admin tool, and a ThreadSanitizer build of the switch
+# Makefile - builds the switch, the test host, the swctl admin tool, the test program, and a ThreadSanitizer build
 CC = gcc
 CFLAGS = -std=c11 -Wall -Wextra -Werror -g -O0 -pthread
 LDLIBS = -lrt
@@ -7,6 +7,7 @@ SWITCH_SRC = switch.c queue.c mactable.c config.c stats.c admin.c logger.c frame
 SWITCH_HDR = switch.h queue.h mactable.h config.h stats.h admin.h logger.h frame.h
 HOST_SRC = host.c frame.c
 SWCTL_SRC = swctl.c stats.c
+TESTS_SRC = tests.c frame.c
 
 all: switch host swctl
 
@@ -19,10 +20,16 @@ host: $(HOST_SRC) frame.h
 swctl: $(SWCTL_SRC) stats.h admin.h config.h
 	$(CC) $(CFLAGS) -o $@ $(SWCTL_SRC) $(LDLIBS)
 
+tests: $(TESTS_SRC) frame.h
+	$(CC) $(CFLAGS) -o $@ $(TESTS_SRC)
+
+test: all tests
+	./tests
+
 tsan: $(SWITCH_SRC) $(SWITCH_HDR)
 	$(CC) $(CFLAGS) -fsanitize=thread -o switch_tsan $(SWITCH_SRC) $(LDLIBS)
 
 clean:
-	rm -f switch host swctl switch_tsan
+	rm -f switch host swctl tests switch_tsan
 
-.PHONY: all clean tsan
+.PHONY: all clean tsan test
